@@ -102,6 +102,7 @@
         const modalMessage = document.getElementById('modal-message');
         const modalCloseBtn = document.getElementById('modal-close-btn');
         const timerBar = document.getElementById('timer-bar');
+        const timerCountdown = document.getElementById('timer-countdown');
         const turnStatus = document.getElementById('turn-status');
         const descriptionInput = document.getElementById('description-input');
         const submitDescriptionBtn = document.getElementById('submit-description-btn');
@@ -114,9 +115,19 @@
             document.getElementById(screenId).classList.remove('hidden');
         }
 
-        function showModal(message) {
+        function showModal(message, callback) {
             modalMessage.textContent = message;
             modal.classList.remove('hidden');
+            if (callback) {
+                modalCloseBtn.onclick = () => {
+                    modal.classList.add('hidden');
+                    callback();
+                };
+            } else {
+                modalCloseBtn.onclick = () => {
+                    modal.classList.add('hidden');
+                };
+            }
         }
 
         modalCloseBtn.addEventListener('click', () => {
@@ -230,7 +241,12 @@
             const players = lobbySnap.data().players;
             const nextTurn = (currentPlayerTurn + 1) % players.length;
 
-            await updateDoc(lobbyRef, { currentPlayerTurn: nextTurn });
+            if (nextTurn === 0) {
+                 // Semua pemain sudah dapat giliran, pindah ke voting
+                 await updateDoc(lobbyRef, { status: 'voting' });
+            } else {
+                await updateDoc(lobbyRef, { currentPlayerTurn: nextTurn });
+            }
         }
         
         async function submitDescription() {
@@ -238,22 +254,15 @@
             const lobbyCode = gameCodeDisplay.textContent;
             
             // Validasi deskripsi
-            if (description.length < 10 && myRoleDisplay.textContent !== "Kamu adalah Spy!") {
-                showModal("Deskripsi minimal 10 karakter. Anda akan dikeluarkan dari game.");
-                // Hapus pemain dari lobi
-                const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
-                const lobbySnap = await getDoc(lobbyRef);
-                const players = lobbySnap.data().players;
-                const updatedPlayers = players.filter(p => p.id !== userId);
-                await updateDoc(lobbyRef, { players: updatedPlayers });
-                
-                // Pindah ke layar utama
-                if (unsubscribeLobby) unsubscribeLobby();
-                showScreen('main-menu-screen');
-                return;
+            if (description.length < 10) {
+                if (myRoleDisplay.textContent !== "Kamu adalah Spy!") {
+                     showModal("Deskripsi minimal 10 karakter.");
+                     return;
+                }
             }
             
             // Lanjutkan ke giliran berikutnya
+            descriptionInput.value = '';
             const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
             const lobbySnap = await getDoc(lobbyRef);
             const lobbyData = lobbySnap.data();
@@ -278,6 +287,16 @@
             
             await updateDoc(lobbyRef, { votes: newVotes, players: updatedPlayers });
         }
+        
+        async function removePlayerFromLobby(lobbyCode, playerId) {
+            const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
+            const lobbySnap = await getDoc(lobbyRef);
+            if (!lobbySnap.exists()) return;
+            const players = lobbySnap.data().players;
+            const updatedPlayers = players.filter(p => p.id !== playerId);
+            await updateDoc(lobbyRef, { players: updatedPlayers });
+        }
+
 
         // --- Listener Real-time `onSnapshot` ---
         function listenToLobby(lobbyCode) {
@@ -367,14 +386,14 @@
             if (isMyTurn) {
                 gameControlSection.classList.remove('hidden');
                 descriptionInput.focus();
-                startTurnTimer();
+                startTurnTimer(lobbyData.spyId === userId);
             } else {
                 gameControlSection.classList.add('hidden');
                 clearInterval(gameTimer);
             }
         }
         
-        function startTurnTimer() {
+        function startTurnTimer(isSpy) {
             clearInterval(gameTimer);
             let timeLeft = 15;
             timerBar.style.width = '100%';
@@ -382,6 +401,7 @@
             
             gameTimer = setInterval(() => {
                 timeLeft--;
+                timerCountdown.textContent = `${timeLeft}s`;
                 timerBar.style.width = `${(timeLeft / 15) * 100}%`;
                 
                 if (timeLeft <= 5) {
@@ -390,7 +410,15 @@
                 
                 if (timeLeft <= 0) {
                     clearInterval(gameTimer);
-                    submitDescription(); // Panggil fungsi submit saat waktu habis
+                    const description = descriptionInput.value.trim();
+                    if (description.length < 10 && !isSpy) {
+                         showModal("Waktu habis! Anda tidak mendeskripsikan dalam 10 karakter. Anda akan dikeluarkan dari game.", () => {
+                             removePlayerFromLobby(gameCodeDisplay.textContent, userId);
+                             showScreen('main-menu-screen');
+                         });
+                    } else {
+                        submitDescription();
+                    }
                 }
             }, 1000);
         }
@@ -477,7 +505,15 @@
             // Lebih baik hapus dokumen lobi atau atur ulang status
         });
         
-        submitDescriptionBtn.addEventListener('click', submitDescription);
+        submitDescriptionBtn.addEventListener('click', () => {
+            const description = descriptionInput.value.trim();
+            const isSpy = myRoleDisplay.textContent === "Kamu adalah Spy!";
+            if (description.length < 10 && !isSpy) {
+                showModal("Deskripsi minimal 10 karakter. Silakan coba lagi.");
+                return;
+            }
+            submitDescription();
+        });
     </script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
@@ -565,8 +601,9 @@
             
             <p id="turn-status" class="text-gray-400 mt-4 text-sm">Diskusikan dengan pemain lain untuk mencari tahu siapa spy!</p>
             
-            <div id="timer-bar-container">
+            <div id="timer-bar-container" class="relative">
                 <div id="timer-bar"></div>
+                <span id="timer-countdown" class="absolute right-2 top-0 text-xs font-mono text-gray-300"></span>
             </div>
 
             <div id="game-control-section" class="hidden">
