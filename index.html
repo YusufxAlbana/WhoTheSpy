@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Who The Spy</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, updateDoc, collection, addDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Atur level log untuk debugging
+        setLogLevel('Debug');
+
+        // --- KONFIGURASI FIREBASE ANDA DI SINI ---
+        // Ganti nilai placeholder ini dengan detail proyek Firebase Anda.
+        // Anda bisa menemukannya di Firebase Console > Project settings.
+                const firebaseConfig = {
+            apiKey: "AIzaSyC6dCBF-GnQBWHqddLGyb8PW15wTl8AQ4M",
+            authDomain: "whothespy-e1acc.firebaseapp.com",
+            projectId: "whothespy-e1acc",
+            storageBucket: "whothespy-e1acc.firebasestorage.app",
+            messagingSenderId: "755508974163",
+            appId: "1:755508974163:web:638f547d7c2c98d0b56ca6",
+            measurementId: "G-JRF5BHBS20"
+        };
+        
+        let db, auth, userId, userDisplayName;
+        let unsubscribeLobby = null;
+        
+        // Atur appId ke projectId sebagai identifikasi unik
+        const appId = firebaseConfig.projectId;
+
+        // --- Konfigurasi dan Inisialisasi Firebase ---
+        try {
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            
+            // Otentikasi pengguna secara otomatis
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    // Tambahkan penundaan kecil untuk memastikan izin Firestore sudah siap
+                    setTimeout(() => {
+                        document.getElementById('create-game-btn').disabled = false;
+                        document.getElementById('join-game-btn').disabled = false;
+                        showScreen('main-menu-screen');
+                        console.log("Pengguna terautentikasi dengan ID:", userId);
+                    }, 1000); // Penundaan 1 detik
+                } else {
+                    try {
+                        await signInAnonymously(auth);
+                    } catch (error) {
+                        console.error("Gagal melakukan autentikasi:", error);
+                        showModal("Gagal melakukan autentikasi. Silakan periksa koneksi atau konfigurasi Firebase Anda.");
+                    }
+                }
+            });
+        } catch (error) {
+            console.error("Gagal menginisialisasi Firebase:", error);
+            document.getElementById('app-container').innerHTML = `
+                <div class="p-6 text-center text-red-500 font-semibold">
+                    Kesalahan: Gagal terhubung ke Firebase. Periksa konfigurasi atau koneksi Anda.
+                </div>
+            `;
+        }
+
+        // --- Data Game ---
+        const LOCATIONS = [
+            { name: "Sekolah", words: ["Guru", "Buku", "Papan Tulis"] },
+            { name: "Rumah Sakit", words: ["Dokter", "Suntikan", "Pasien"] },
+            { name: "Stasiun Kereta", words: ["Rel", "Tiket", "Penumpang"] },
+            { name: "Supermarket", words: ["Keranjang", "Kasir", "Makanan"] },
+            { name: "Taman", words: ["Ayunan", "Pohon", "Rumput"] },
+            { name: "Kantor Polisi", words: ["Pistol", "Borgol", "Penjahat"] },
+            { name: "Bioskop", words: ["Film", "Popcorn", "Layar"] },
+            { name: "Toko Buku", words: ["Novel", "Rak", "Penulis"] },
+            { name: "Kafe", words: ["Kopi", "Meja", "Pelayan"] },
+            { name: "Restoran", words: ["Makanan", "Dapur", "Pelayan"] }
+        ];
+
+        // --- Elemen UI ---
+        const lobbyCodeInput = document.getElementById('lobby-code-input');
+        const playerNameInputCreate = document.getElementById('player-name-input-create');
+        const playerNameInputJoin = document.getElementById('player-name-input-join');
+        const gameCodeDisplay = document.getElementById('game-code-display');
+        const playersList = document.getElementById('players-list');
+        const startGameBtn = document.getElementById('start-game-btn');
+        const myUserIdDisplay = document.getElementById('my-user-id');
+        const myRoleDisplay = document.getElementById('my-role');
+        const myLocationDisplay = document.getElementById('my-location');
+        const myWordList = document.getElementById('my-word-list');
+        const votingPlayerList = document.getElementById('voting-player-list');
+        const gameResultsDisplay = document.getElementById('game-results-display');
+        const voteMessage = document.getElementById('vote-message');
+        const modal = document.getElementById('modal');
+        const modalMessage = document.getElementById('modal-message');
+        const modalCloseBtn = document.getElementById('modal-close-btn');
+
+        // --- Fungsi Utility ---
+        function showScreen(screenId) {
+            const screens = document.querySelectorAll('.game-screen');
+            screens.forEach(screen => screen.classList.add('hidden'));
+            document.getElementById(screenId).classList.remove('hidden');
+        }
+
+        function showModal(message) {
+            modalMessage.textContent = message;
+            modal.classList.remove('hidden');
+        }
+
+        modalCloseBtn.addEventListener('click', () => {
+            modal.classList.add('hidden');
+        });
+
+        // --- Logika Lobi ---
+        function generateLobbyCode() {
+            return Math.floor(100000 + Math.random() * 900000).toString();
+        }
+
+        async function createNewLobby() {
+            if (!userId) {
+                showModal("Sedang mengautentikasi... Silakan coba lagi sebentar.");
+                return;
+            }
+            userDisplayName = playerNameInputCreate.value.trim();
+            if (!userDisplayName) { showModal("Nama pemain tidak boleh kosong!"); return; }
+
+            const lobbyCode = generateLobbyCode();
+            const newLobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
+            
+            const randomLocation = LOCATIONS[Math.floor(Math.random() * LOCATIONS.length)];
+            const newGameState = {
+                status: 'lobby',
+                hostId: userId,
+                players: [{ id: userId, name: userDisplayName, isHost: true, vote: null }],
+                location: { name: randomLocation.name, words: randomLocation.words },
+                spyId: null,
+                votes: {},
+                winner: null
+            };
+
+            try {
+                await setDoc(newLobbyRef, newGameState);
+                showScreen('lobby-screen');
+                gameCodeDisplay.textContent = lobbyCode;
+                myUserIdDisplay.textContent = `ID Anda: ${userId}`;
+                listenToLobby(lobbyCode);
+            } catch (error) {
+                console.error("Gagal membuat lobi:", error);
+                showModal("Gagal membuat lobi. Silakan coba lagi.");
+            }
+        }
+
+        async function joinExistingLobby() {
+            if (!userId) {
+                showModal("Sedang mengautentikasi... Silakan coba lagi sebentar.");
+                return;
+            }
+            const lobbyCode = lobbyCodeInput.value.trim();
+            userDisplayName = playerNameInputJoin.value.trim();
+            if (!lobbyCode || !userDisplayName) { showModal("Kode lobi dan nama pemain harus diisi."); return; }
+
+            const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
+            const lobbySnap = await getDoc(lobbyRef);
+            
+            if (lobbySnap.exists()) {
+                const lobbyData = lobbySnap.data();
+                if (lobbyData.status !== 'lobby') {
+                    showModal("Lobi sudah tidak tersedia untuk bergabung.");
+                    return;
+                }
+                // Check if user is already in the lobby
+                if (lobbyData.players.some(p => p.id === userId)) {
+                     showScreen('lobby-screen');
+                     gameCodeDisplay.textContent = lobbyCode;
+                     myUserIdDisplay.textContent = `ID Anda: ${userId}`;
+                     listenToLobby(lobbyCode);
+                     return;
+                }
+                const newPlayer = { id: userId, name: userDisplayName, isHost: false, vote: null };
+                const updatedPlayers = [...lobbyData.players, newPlayer];
+                await updateDoc(lobbyRef, { players: updatedPlayers });
+                showScreen('lobby-screen');
+                gameCodeDisplay.textContent = lobbyCode;
+                myUserIdDisplay.textContent = `ID Anda: ${userId}`;
+                listenToLobby(lobbyCode);
+            } else {
+                showModal("Lobi tidak ditemukan.");
+            }
+        }
+
+        // --- Logika Game ---
+        async function startGame(lobbyCode) {
+            const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
+            const lobbySnap = await getDoc(lobbyRef);
+            if (!lobbySnap.exists()) return;
+
+            const lobbyData = lobbySnap.data();
+            if (lobbyData.players.length < 3) {
+                showModal("Minimal 3 pemain untuk memulai game.");
+                return;
+            }
+
+            const players = lobbyData.players;
+            const spyIndex = Math.floor(Math.random() * players.length);
+            const spyId = players[spyIndex].id;
+
+            await updateDoc(lobbyRef, {
+                status: 'in-game',
+                spyId: spyId
+            });
+        }
+
+        async function votePlayer(votedId, lobbyCode) {
+            const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
+            const lobbySnap = await getDoc(lobbyRef);
+            if (!lobbySnap.exists()) return;
+
+            const lobbyData = lobbySnap.data();
+            const newVotes = { ...lobbyData.votes, [userId]: votedId };
+
+            const updatedPlayers = lobbyData.players.map(player => {
+                if (player.id === userId) {
+                    return { ...player, vote: votedId };
+                }
+                return player;
+            });
+            
+            await updateDoc(lobbyRef, { votes: newVotes, players: updatedPlayers });
+        }
+
+        // --- Listener Real-time `onSnapshot` ---
+        function listenToLobby(lobbyCode) {
+            if (unsubscribeLobby) unsubscribeLobby();
+            const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
+
+            unsubscribeLobby = onSnapshot(lobbyRef, (docSnap) => {
+                if (!docSnap.exists()) {
+                    showModal("Lobi telah ditutup.");
+                    showScreen('main-menu-screen');
+                    return;
+                }
+                const lobbyData = docSnap.data();
+                
+                switch (lobbyData.status) {
+                    case 'lobby':
+                        renderLobby(lobbyData);
+                        break;
+                    case 'in-game':
+                        renderGame(lobbyData);
+                        break;
+                    case 'voting':
+                        renderVoting(lobbyData);
+                        break;
+                    case 'ended':
+                        renderResults(lobbyData);
+                        break;
+                    default:
+                        break;
+                }
+            }, (error) => {
+                console.error("Kesalahan mendengarkan lobi:", error);
+                showModal("Terjadi kesalahan. Silakan coba lagi.");
+                showScreen('main-menu-screen');
+            });
+        }
+
+        // --- Rendering UI Berdasarkan State ---
+        function renderLobby(lobbyData) {
+            showScreen('lobby-screen');
+            
+            playersList.innerHTML = '';
+            lobbyData.players.forEach(player => {
+                const li = document.createElement('li');
+                li.className = 'text-center p-2 rounded-lg bg-gray-700 text-gray-100 flex items-center justify-center space-x-2';
+                li.textContent = `${player.name} (${player.id === userId ? 'Anda' : 'Pemain'})`;
+                if (player.isHost) {
+                    li.textContent += ' (Host)';
+                    li.classList.add('ring-2', 'ring-indigo-400');
+                }
+                playersList.appendChild(li);
+            });
+            
+            if (lobbyData.hostId === userId) {
+                startGameBtn.classList.remove('hidden');
+            } else {
+                startGameBtn.classList.add('hidden');
+            }
+        }
+
+        function renderGame(lobbyData) {
+            showScreen('game-screen');
+            
+            myRoleDisplay.textContent = (lobbyData.spyId === userId) ? "Kamu adalah Spy!" : "Bukan Spy";
+            if (lobbyData.spyId === userId) {
+                myLocationDisplay.textContent = "Tugasmu adalah mencari tahu lokasi rahasia.";
+                myLocationDisplay.classList.add('text-red-400');
+                myWordList.innerHTML = '';
+            } else {
+                myLocationDisplay.textContent = `Lokasi: ${lobbyData.location.name}`;
+                myLocationDisplay.classList.remove('text-red-400');
+                myWordList.innerHTML = '';
+                lobbyData.location.words.forEach(word => {
+                    const li = document.createElement('li');
+                    li.className = 'p-2 rounded-lg bg-gray-700 text-gray-100';
+                    li.textContent = word;
+                    myWordList.appendChild(li);
+                });
+            }
+            
+            // Periksa apakah semua pemain sudah siap, lalu mulai voting
+            // Skenario sederhana: Tampilkan tombol voting setelah beberapa detik
+            setTimeout(() => {
+                const playerNames = lobbyData.players.map(p => p.name).join(', ');
+                voteMessage.textContent = `Diskusikan sekarang! Pemain: ${playerNames}`;
+                showScreen('voting-screen');
+            }, 60000); // 60 detik untuk diskusi
+        }
+
+        function renderVoting(lobbyData) {
+            showScreen('voting-screen');
+            votingPlayerList.innerHTML = '';
+            
+            lobbyData.players.forEach(player => {
+                const li = document.createElement('li');
+                li.className = 'p-4 rounded-lg bg-gray-700 text-gray-100 cursor-pointer hover:bg-indigo-600 transition-colors duration-300';
+                li.textContent = player.name;
+                li.addEventListener('click', () => {
+                    if (player.id !== userId) {
+                        votePlayer(player.id, gameCodeDisplay.textContent);
+                        showModal(`Anda memilih ${player.name}`);
+                        // Ganti UI setelah voting selesai
+                        // Ini adalah logika sederhana, akan lebih baik jika ada tombol "Selesai Voting"
+                        setTimeout(() => checkAllVotesAndEndGame(gameCodeDisplay.textContent), 3000);
+                    }
+                });
+                votingPlayerList.appendChild(li);
+            });
+        }
+        
+        async function checkAllVotesAndEndGame(lobbyCode) {
+            const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
+            const lobbySnap = await getDoc(lobbyRef);
+            if (!lobbySnap.exists()) return;
+            const lobbyData = lobbySnap.data();
+            
+            if (Object.keys(lobbyData.votes).length === lobbyData.players.length) {
+                // Semua pemain sudah vote, hitung hasil
+                const voteCounts = {};
+                for (const voterId in lobbyData.votes) {
+                    const votedPlayerId = lobbyData.votes[voterId];
+                    voteCounts[votedPlayerId] = (voteCounts[votedPlayerId] || 0) + 1;
+                }
+
+                let mostVotedId = null;
+                let maxVotes = 0;
+                for (const playerId in voteCounts) {
+                    if (voteCounts[playerId] > maxVotes) {
+                        maxVotes = voteCounts[playerId];
+                        mostVotedId = playerId;
+                    }
+                }
+                
+                const winner = (mostVotedId === lobbyData.spyId) ? "Bukan Spy" : "Spy";
+                await updateDoc(lobbyRef, { status: 'ended', winner: winner });
+            }
+        }
+        
+        function renderResults(lobbyData) {
+            showScreen('results-screen');
+            gameResultsDisplay.innerHTML = `
+                <p class="text-3xl font-bold mb-4">Pemenang: Tim ${lobbyData.winner}!</p>
+                <div class="space-y-2">
+                    <h3 class="text-xl font-semibold mb-2">Peran Semua Pemain:</h3>
+                    <ul class="list-disc list-inside">
+                        ${lobbyData.players.map(p => `
+                            <li>
+                                <strong>${p.name}</strong>: 
+                                <span class="${p.id === lobbyData.spyId ? 'text-red-400' : 'text-green-400'}">
+                                    ${p.id === lobbyData.spyId ? 'Spy' : 'Bukan Spy'}
+                                </span>
+                            </li>
+                        `).join('')}
+                    </ul>
+                </div>
+            `;
+        }
+
+        // --- Event Listeners ---
+        document.getElementById('create-game-btn').addEventListener('click', () => showScreen('name-screen-create'));
+        document.getElementById('join-game-btn').addEventListener('click', () => showScreen('name-screen-join'));
+        document.getElementById('submit-name-create').addEventListener('click', createNewLobby);
+        document.getElementById('submit-name-join').addEventListener('click', joinExistingLobby);
+        document.getElementById('start-game-btn').addEventListener('click', () => startGame(gameCodeDisplay.textContent));
+        document.getElementById('new-game-btn').addEventListener('click', () => {
+            if (unsubscribeLobby) unsubscribeLobby();
+            showScreen('main-menu-screen');
+            // Logika reset state di Firebase
+            // Lebih baik hapus dokumen lobi atau atur ulang status
+        });
+        
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .container {
+            max-width: 600px;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 flex items-center justify-center min-h-screen p-4">
+
+    <div id="app-container" class="container mx-auto p-8 bg-gray-800 rounded-2xl shadow-xl border-t-4 border-b-4 border-indigo-500 transition-all duration-500 ease-in-out">
+        
+        <!-- Modal untuk Notifikasi -->
+        <div id="modal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50 hidden">
+            <div class="bg-gray-700 p-6 rounded-xl shadow-lg border-2 border-indigo-400 max-w-sm w-full text-center">
+                <p id="modal-message" class="text-lg font-semibold mb-4"></p>
+                <button id="modal-close-btn" class="bg-indigo-500 text-white font-bold py-2 px-4 rounded-full hover:bg-indigo-600 transition-colors duration-300">Tutup</button>
+            </div>
+        </div>
+
+        <!-- Layar Utama -->
+        <div id="main-menu-screen" class="game-screen text-center space-y-6">
+            <h1 class="text-5xl font-bold mb-2 text-indigo-400 drop-shadow-md">Siapakah Spy?</h1>
+            <p class="text-gray-400">Mainkan game detektif sosial ini bersama teman-temanmu!</p>
+            <div class="space-y-4">
+                <button id="create-game-btn" class="w-full bg-indigo-500 text-white font-bold py-3 px-6 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105 shadow-lg">Buat Game Baru</button>
+                <button id="join-game-btn" class="w-full bg-gray-700 text-gray-100 font-bold py-3 px-6 rounded-full hover:bg-gray-600 transition-transform duration-300 transform hover:scale-105 shadow-lg">Gabung Game</button>
+            </div>
+        </div>
+
+        <!-- Layar Formulir Nama (Buat Game) -->
+        <div id="name-screen-create" class="game-screen text-center space-y-6 hidden">
+            <h2 class="text-3xl font-bold text-indigo-400 mb-4">Buat Game Baru</h2>
+            <input type="text" id="player-name-input-create" placeholder="Masukkan nama Anda" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <button id="submit-name-create" class="w-full bg-indigo-500 text-white font-bold py-3 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105">Lanjutkan</button>
+        </div>
+
+        <!-- Layar Formulir Gabung Game -->
+        <div id="name-screen-join" class="game-screen text-center space-y-6 hidden">
+            <h2 class="text-3xl font-bold text-indigo-400 mb-4">Gabung Game</h2>
+            <input type="text" id="player-name-input-join" placeholder="Masukkan nama Anda" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-4">
+            <input type="text" id="lobby-code-input" placeholder="Masukkan kode lobi" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <button id="submit-name-join" class="w-full bg-indigo-500 text-white font-bold py-3 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105">Gabung</button>
+        </div>
+
+        <!-- Layar Lobby -->
+        <div id="lobby-screen" class="game-screen text-center space-y-6 hidden">
+            <h2 class="text-3xl font-bold text-indigo-400 mb-2">Lobi Game</h2>
+            <p class="text-gray-400 text-sm">Bagikan kode ini ke teman-temanmu!</p>
+            <div class="bg-gray-700 p-4 rounded-xl shadow-inner border-2 border-indigo-400">
+                <p class="text-lg font-bold text-indigo-300">Kode Lobi:</p>
+                <span id="game-code-display" class="text-4xl font-extrabold text-indigo-200 tracking-wide mt-1"></span>
+            </div>
+            <p class="text-gray-400 text-sm" id="my-user-id"></p>
+            <h3 class="text-xl font-semibold mb-2">Pemain yang Bergabung:</h3>
+            <ul id="players-list" class="space-y-2"></ul>
+            <button id="start-game-btn" class="w-full bg-green-500 text-white font-bold py-3 rounded-full hover:bg-green-600 transition-transform duration-300 transform hover:scale-105 hidden mt-4">Mulai Game!</button>
+        </div>
+
+        <!-- Layar Game -->
+        <div id="game-screen" class="game-screen text-center space-y-6 hidden">
+            <h2 id="my-role" class="text-3xl font-bold text-green-400 mb-4"></h2>
+            <div class="bg-gray-700 p-6 rounded-2xl shadow-inner border-2 border-green-400 space-y-4">
+                <p id="my-location" class="text-2xl font-semibold text-gray-200"></p>
+                <h3 class="text-lg font-semibold text-gray-400">Kata-kata:</h3>
+                <ul id="my-word-list" class="space-y-2 text-center"></ul>
+            </div>
+            <p class="text-gray-400 mt-4 text-sm">Diskusikan dengan pemain lain untuk mencari tahu siapa spy!</p>
+        </div>
+
+        <!-- Layar Voting -->
+        <div id="voting-screen" class="game-screen text-center space-y-6 hidden">
+            <h2 class="text-3xl font-bold text-indigo-400 mb-4">Fase Voting</h2>
+            <p id="vote-message" class="text-gray-400"></p>
+            <p class="text-lg font-semibold text-gray-300 mb-4">Pilih pemain yang Anda curigai sebagai Spy:</p>
+            <ul id="voting-player-list" class="space-y-3"></ul>
+        </div>
+        
+        <!-- Layar Hasil -->
+        <div id="results-screen" class="game-screen text-center space-y-6 hidden">
+            <h2 class="text-3xl font-bold text-indigo-400 mb-4">Hasil Game!</h2>
+            <div id="game-results-display" class="bg-gray-700 p-6 rounded-2xl shadow-inner border-2 border-indigo-400 space-y-4"></div>
+            <button id="new-game-btn" class="w-full bg-indigo-500 text-white font-bold py-3 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105">Main Lagi</button>
+        </div>
+    </div>
+</body>
+</html>
