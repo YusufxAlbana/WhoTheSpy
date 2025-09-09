@@ -7,8 +7,8 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, getDoc, setDoc, onSnapshot, updateDoc, collection, addDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, updateDoc, collection, addDoc, query, orderBy, limit, getDocs, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
         // Atur level log untuk debugging
@@ -27,8 +27,12 @@
             measurementId: "G-JRF5BHBS20"
         };
         
+        // ID pengguna pengembang yang bisa menghapus chat atau mengeluarkan pemain
+        const DEVELOPER_IDS = ["idpengembang_123456789"]; // GANTI DENGAN ID PENGGUNA ANDA
+
         let db, auth, userId, userDisplayName;
         let unsubscribeLobby = null;
+        let unsubscribeChat = null;
         
         // Atur appId ke projectId sebagai identifikasi unik
         const appId = firebaseConfig.projectId;
@@ -41,24 +45,22 @@
             db = getFirestore(app);
             auth = getAuth(app);
             
-            // Otentikasi pengguna secara otomatis
+            // Otentikasi pengguna
             onAuthStateChanged(auth, async (user) => {
                 if (user) {
                     userId = user.uid;
-                    // Tambahkan penundaan kecil untuk memastikan izin Firestore sudah siap
-                    setTimeout(() => {
-                        document.getElementById('create-game-btn').disabled = false;
-                        document.getElementById('join-game-btn').disabled = false;
+                    const userDocRef = doc(db, `artifacts/${appId}/users`, userId);
+                    const userDocSnap = await getDoc(userDocRef);
+                    if (userDocSnap.exists()) {
+                        userDisplayName = userDocSnap.data().displayName;
                         showScreen('main-menu-screen');
-                        console.log("Pengguna terautentikasi dengan ID:", userId);
-                    }, 1000); // Penundaan 1 detik
-                } else {
-                    try {
-                        await signInAnonymously(auth);
-                    } catch (error) {
-                        console.error("Gagal melakukan autentikasi:", error);
-                        showModal("Gagal melakukan autentikasi. Silakan periksa koneksi atau konfigurasi Firebase Anda.");
+                        listenToChat();
+                    } else {
+                        // Pengguna terautentikasi (mungkin dari provider lain) tapi belum punya display name
+                        showScreen('register-screen');
                     }
+                } else {
+                    showScreen('auth-screen');
                 }
             });
         } catch (error) {
@@ -86,8 +88,11 @@
 
         // --- Elemen UI ---
         const lobbyCodeInput = document.getElementById('lobby-code-input');
-        const playerNameInputCreate = document.getElementById('player-name-input-create');
-        const playerNameInputJoin = document.getElementById('player-name-input-join');
+        const registerNameInput = document.getElementById('register-name-input');
+        const registerEmailInput = document.getElementById('register-email-input');
+        const registerPasswordInput = document.getElementById('register-password-input');
+        const loginEmailInput = document.getElementById('login-email-input');
+        const loginPasswordInput = document.getElementById('login-password-input');
         const gameCodeDisplay = document.getElementById('game-code-display');
         const playersList = document.getElementById('players-list');
         const startGameBtn = document.getElementById('start-game-btn');
@@ -107,45 +112,125 @@
         const descriptionInput = document.getElementById('description-input');
         const submitDescriptionBtn = document.getElementById('submit-description-btn');
         const gameControlSection = document.getElementById('game-control-section');
+        const chatMessages = document.getElementById('chat-messages');
+        const chatInput = document.getElementById('chat-input');
+        const chatSendBtn = document.getElementById('chat-send-btn');
+        const authScreen = document.getElementById('auth-screen');
+        const developerControls = document.getElementById('developer-controls');
+        const kickPlayerBtn = document.getElementById('kick-player-btn');
+        const kickPlayerModal = document.getElementById('kick-player-modal');
+        const kickPlayerIdInput = document.getElementById('kick-player-id-input');
+        const submitKickBtn = document.getElementById('submit-kick-btn');
+        const closeKickModalBtn = document.getElementById('close-kick-modal-btn');
+        const clearChatBtn = document.getElementById('clear-chat-btn');
 
         // --- Fungsi Utility ---
         function showScreen(screenId) {
             const screens = document.querySelectorAll('.game-screen');
             screens.forEach(screen => screen.classList.add('hidden'));
             document.getElementById(screenId).classList.remove('hidden');
+            if(screenId === 'main-menu-screen') {
+                if (DEVELOPER_IDS.includes(userId)) {
+                    developerControls.classList.remove('hidden');
+                } else {
+                    developerControls.classList.add('hidden');
+                }
+            }
         }
 
-        function showModal(message, callback) {
+        function showModal(message, withCloseBtn = true) {
             modalMessage.textContent = message;
             modal.classList.remove('hidden');
-            if (callback) {
-                modalCloseBtn.onclick = () => {
-                    modal.classList.add('hidden');
-                    callback();
-                };
+            if (withCloseBtn) {
+                modalCloseBtn.classList.remove('hidden');
             } else {
-                modalCloseBtn.onclick = () => {
-                    modal.classList.add('hidden');
-                };
+                modalCloseBtn.classList.add('hidden');
             }
+        }
+        
+        function hideModal() {
+            modal.classList.add('hidden');
         }
 
         modalCloseBtn.addEventListener('click', () => {
             modal.classList.add('hidden');
         });
 
-        // --- Logika Lobi ---
+        // --- Auth Logic ---
+        async function handleRegister() {
+            const name = registerNameInput.value.trim();
+            const email = registerEmailInput.value.trim();
+            const password = registerPasswordInput.value.trim();
+
+            if (!name || !email || !password) {
+                showModal("Nama, email, dan password tidak boleh kosong.", true);
+                return;
+            }
+
+            if (password.length < 6) {
+                showModal("Password harus minimal 6 karakter.", true);
+                return;
+            }
+
+            try {
+                const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+                userId = userCredential.user.uid;
+                userDisplayName = name;
+                
+                await setDoc(doc(db, `artifacts/${appId}/users`, userId), {
+                    displayName: userDisplayName,
+                    email: email
+                });
+
+                showScreen('main-menu-screen');
+                listenToChat();
+            } catch (error) {
+                console.error("Gagal mendaftar:", error);
+                showModal(`Gagal mendaftar: ${error.message}`, true);
+            }
+        }
+
+        async function handleLogin() {
+            const email = loginEmailInput.value.trim();
+            const password = loginPasswordInput.value.trim();
+
+            if (!email || !password) {
+                showModal("Email dan password tidak boleh kosong.", true);
+                return;
+            }
+
+            try {
+                const userCredential = await signInWithEmailAndPassword(auth, email, password);
+                userId = userCredential.user.uid;
+                
+                const userDocRef = doc(db, `artifacts/${appId}/users`, userId);
+                const userDocSnap = await getDoc(userDocRef);
+                if (userDocSnap.exists()) {
+                    userDisplayName = userDocSnap.data().displayName;
+                    showScreen('main-menu-screen');
+                    listenToChat();
+                } else {
+                    showModal("Data pengguna tidak ditemukan. Silakan daftar terlebih dahulu.", true);
+                }
+            } catch (error) {
+                console.error("Gagal login:", error);
+                showModal(`Gagal login: ${error.message}`, true);
+            }
+        }
+
+
+        // --- Lobby Logic ---
         function generateLobbyCode() {
             return Math.floor(100000 + Math.random() * 900000).toString();
         }
 
         async function createNewLobby() {
-            if (!userId) {
-                showModal("Sedang mengautentikasi... Silakan coba lagi sebentar.");
+            if (!userId || !userDisplayName) {
+                showModal("Sedang memuat... Silakan coba lagi.", true);
                 return;
             }
-            userDisplayName = playerNameInputCreate.value.trim();
-            if (!userDisplayName) { showModal("Nama pemain tidak boleh kosong!"); return; }
+
+            showModal("Sedang membuat lobi...", false);
 
             const lobbyCode = generateLobbyCode();
             const newLobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
@@ -163,24 +248,25 @@
 
             try {
                 await setDoc(newLobbyRef, newGameState);
+                hideModal();
                 showScreen('lobby-screen');
                 gameCodeDisplay.textContent = lobbyCode;
                 myUserIdDisplay.textContent = `ID Anda: ${userId}`;
                 listenToLobby(lobbyCode);
             } catch (error) {
                 console.error("Gagal membuat lobi:", error);
-                showModal("Gagal membuat lobi. Silakan coba lagi.");
+                hideModal();
+                showModal("Gagal membuat lobi. Silakan coba lagi.", true);
             }
         }
 
         async function joinExistingLobby() {
-            if (!userId) {
-                showModal("Sedang mengautentikasi... Silakan coba lagi sebentar.");
+            if (!userId || !userDisplayName) {
+                showModal("Sedang memuat... Silakan coba lagi.", true);
                 return;
             }
             const lobbyCode = lobbyCodeInput.value.trim();
-            userDisplayName = playerNameInputJoin.value.trim();
-            if (!lobbyCode || !userDisplayName) { showModal("Kode lobi dan nama pemain harus diisi."); return; }
+            if (!lobbyCode) { showModal("Kode lobi harus diisi.", true); return; }
 
             const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
             const lobbySnap = await getDoc(lobbyRef);
@@ -188,10 +274,9 @@
             if (lobbySnap.exists()) {
                 const lobbyData = lobbySnap.data();
                 if (lobbyData.status !== 'lobby') {
-                    showModal("Lobi sudah tidak tersedia untuk bergabung.");
+                    showModal("Lobi sudah tidak tersedia untuk bergabung.", true);
                     return;
                 }
-                // Check if user is already in the lobby
                 if (lobbyData.players.some(p => p.id === userId)) {
                      showScreen('lobby-screen');
                      gameCodeDisplay.textContent = lobbyCode;
@@ -207,11 +292,11 @@
                 myUserIdDisplay.textContent = `ID Anda: ${userId}`;
                 listenToLobby(lobbyCode);
             } else {
-                showModal("Lobi tidak ditemukan.");
+                showModal("Lobi tidak ditemukan.", true);
             }
         }
 
-        // --- Logika Game ---
+        // --- Game Logic ---
         async function startGame(lobbyCode) {
             const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
             const lobbySnap = await getDoc(lobbyRef);
@@ -219,7 +304,7 @@
 
             const lobbyData = lobbySnap.data();
             if (lobbyData.players.length < 3) {
-                showModal("Minimal 3 pemain untuk memulai game.");
+                showModal("Minimal 3 pemain untuk memulai game.", true);
                 return;
             }
 
@@ -230,11 +315,10 @@
             await updateDoc(lobbyRef, {
                 status: 'in-game',
                 spyId: spyId,
-                currentPlayerTurn: 0 // Mulai giliran dari pemain pertama
+                currentPlayerTurn: 0 
             });
         }
         
-        // Fungsi untuk mengatur giliran
         async function setNextPlayerTurn(lobbyCode, currentPlayerTurn) {
             const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
             const lobbySnap = await getDoc(lobbyRef);
@@ -242,7 +326,6 @@
             const nextTurn = (currentPlayerTurn + 1) % players.length;
 
             if (nextTurn === 0) {
-                 // Semua pemain sudah dapat giliran, pindah ke voting
                  await updateDoc(lobbyRef, { status: 'voting' });
             } else {
                 await updateDoc(lobbyRef, { currentPlayerTurn: nextTurn });
@@ -253,15 +336,13 @@
             const description = descriptionInput.value.trim();
             const lobbyCode = gameCodeDisplay.textContent;
             
-            // Validasi deskripsi
             if (description.length < 10) {
                 if (myRoleDisplay.textContent !== "Kamu adalah Spy!") {
-                     showModal("Deskripsi minimal 10 karakter.");
+                     showModal("Deskripsi minimal 10 karakter.", true);
                      return;
                 }
             }
             
-            // Simpan deskripsi pemain di Firestore
             const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
             const lobbySnap = await getDoc(lobbyRef);
             const players = lobbySnap.data().players;
@@ -274,7 +355,6 @@
 
             await updateDoc(lobbyRef, { players: updatedPlayers });
 
-            // Lanjutkan ke giliran berikutnya
             descriptionInput.value = '';
             const lobbyData = lobbySnap.data();
             const currentPlayerTurn = lobbyData.currentPlayerTurn;
@@ -306,17 +386,18 @@
             const players = lobbySnap.data().players;
             const updatedPlayers = players.filter(p => p.id !== playerId);
             await updateDoc(lobbyRef, { players: updatedPlayers });
+            showModal("Pemain telah dikeluarkan dari lobi.", true);
         }
 
 
-        // --- Listener Real-time `onSnapshot` ---
+        // --- Real-time Listener `onSnapshot` ---
         function listenToLobby(lobbyCode) {
             if (unsubscribeLobby) unsubscribeLobby();
             const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
 
             unsubscribeLobby = onSnapshot(lobbyRef, (docSnap) => {
                 if (!docSnap.exists()) {
-                    showModal("Lobi telah ditutup.");
+                    showModal("Lobi telah ditutup.", true);
                     showScreen('main-menu-screen');
                     return;
                 }
@@ -339,13 +420,79 @@
                         break;
                 }
             }, (error) => {
-                console.error("Kesalahan mendengarkan lobi:", error);
-                showModal("Terjadi kesalahan. Silakan coba lagi.");
+                console.error("Error listening to lobby:", error);
+                showModal("Terjadi kesalahan. Silakan coba lagi.", true);
                 showScreen('main-menu-screen');
             });
         }
+        
+        // --- Global Chat Logic ---
+        const CHAT_COLLECTION = `artifacts/${appId}/public/data/global-chat`;
+        
+        async function clearGlobalChat() {
+            if (!DEVELOPER_IDS.includes(userId)) {
+                showModal("Anda tidak memiliki izin untuk melakukan ini.", true);
+                return;
+            }
+            showModal("Menghapus chat...", false);
+            try {
+                const q = query(collection(db, CHAT_COLLECTION));
+                const snapshot = await getDocs(q);
+                const batch = writeBatch(db);
+                snapshot.docs.forEach((doc) => {
+                    batch.delete(doc.ref);
+                });
+                await batch.commit();
+                hideModal();
+                showModal("Chat global berhasil dihapus.", true);
+            } catch (error) {
+                console.error("Gagal menghapus chat:", error);
+                hideModal();
+                showModal("Gagal menghapus chat. Silakan coba lagi.", true);
+            }
+        }
 
-        // --- Rendering UI Berdasarkan State ---
+        async function sendMessage() {
+            const message = chatInput.value.trim();
+            if (message === '') return;
+
+            const chatData = {
+                senderId: userId,
+                senderName: userDisplayName || 'Anonim',
+                message: message,
+                timestamp: Date.now()
+            };
+
+            await addDoc(collection(db, CHAT_COLLECTION), chatData);
+            chatInput.value = '';
+        }
+        
+        function listenToChat() {
+            if (unsubscribeChat) unsubscribeChat();
+            const chatRef = collection(db, CHAT_COLLECTION);
+            const q = query(chatRef, orderBy("timestamp", "desc"), limit(100));
+
+            unsubscribeChat = onSnapshot(q, (snapshot) => {
+                chatMessages.innerHTML = '';
+                snapshot.docChanges().reverse().forEach((change) => {
+                    const messageData = change.doc.data();
+                    const li = document.createElement('li');
+                    li.className = `py-1 ${messageData.senderId === userId ? 'text-right' : 'text-left'}`;
+                    li.innerHTML = `
+                        <div class="inline-block p-2 rounded-xl max-w-[80%] break-words ${messageData.senderId === userId ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-gray-600 text-gray-100 rounded-bl-none'}">
+                            <span class="font-bold text-sm">${messageData.senderName}</span>
+                            <p class="text-xs mt-1">${messageData.message}</p>
+                        </div>
+                    `;
+                    chatMessages.appendChild(li);
+                });
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }, (error) => {
+                console.error("Failed to listen to chat:", error);
+            });
+        }
+        
+        // --- Rendering UI Based on State ---
         function renderLobby(lobbyData) {
             showScreen('lobby-screen');
             
@@ -388,7 +535,7 @@
                 });
             }
             
-            // Atur giliran
+            // Set turn
             const players = lobbyData.players;
             const currentPlayer = players[lobbyData.currentPlayerTurn];
             isMyTurn = (currentPlayer.id === userId);
@@ -408,7 +555,7 @@
             clearInterval(gameTimer);
             let timeLeft = 15;
             timerBar.style.width = '100%';
-            timerBar.style.backgroundColor = '#4CAF50'; // Hijau
+            timerBar.style.backgroundColor = '#4CAF50';
             
             gameTimer = setInterval(() => {
                 timeLeft--;
@@ -416,7 +563,7 @@
                 timerBar.style.width = `${(timeLeft / 15) * 100}%`;
                 
                 if (timeLeft <= 5) {
-                    timerBar.style.backgroundColor = '#F44336'; // Merah
+                    timerBar.style.backgroundColor = '#F44336';
                 }
                 
                 if (timeLeft <= 0) {
@@ -443,7 +590,6 @@
                 return acc;
             }, {});
 
-            // Hitung vote
             for (const voterId in lobbyData.votes) {
                 const votedPlayerId = lobbyData.votes[voterId];
                 if (voteCounts[votedPlayerId] !== undefined) {
@@ -465,9 +611,7 @@
                 li.addEventListener('click', () => {
                     if (player.id !== userId) {
                         votePlayer(player.id, gameCodeDisplay.textContent);
-                        showModal(`Anda memilih ${player.name}`);
-                        // Ganti UI setelah voting selesai
-                        // Ini adalah logika sederhana, akan lebih baik jika ada tombol "Selesai Voting"
+                        showModal(`Anda memilih ${player.name}`, true);
                         setTimeout(() => checkAllVotesAndEndGame(gameCodeDisplay.textContent), 3000);
                     }
                 });
@@ -482,7 +626,6 @@
             const lobbyData = lobbySnap.data();
             
             if (Object.keys(lobbyData.votes).length === lobbyData.players.length) {
-                // Semua pemain sudah vote, hitung hasil
                 const voteCounts = {};
                 for (const voterId in lobbyData.votes) {
                     const votedPlayerId = lobbyData.votes[voterId];
@@ -524,20 +667,50 @@
         }
 
         // --- Event Listeners ---
-        document.getElementById('create-game-btn').addEventListener('click', () => showScreen('name-screen-create'));
+        document.getElementById('show-register-btn').addEventListener('click', () => showScreen('register-screen'));
+        document.getElementById('show-login-btn').addEventListener('click', () => showScreen('login-screen'));
+        document.getElementById('submit-register').addEventListener('click', handleRegister);
+        document.getElementById('submit-login').addEventListener('click', handleLogin);
+        document.getElementById('create-game-btn').addEventListener('click', createNewLobby);
         document.getElementById('join-game-btn').addEventListener('click', () => showScreen('name-screen-join'));
-        document.getElementById('submit-name-create').addEventListener('click', createNewLobby);
         document.getElementById('submit-name-join').addEventListener('click', joinExistingLobby);
         document.getElementById('start-game-btn').addEventListener('click', () => startGame(gameCodeDisplay.textContent));
         document.getElementById('new-game-btn').addEventListener('click', () => {
             if (unsubscribeLobby) unsubscribeLobby();
             showScreen('main-menu-screen');
-            // Logika reset state di Firebase
-            // Lebih baik hapus dokumen lobi atau atur ulang status
         });
         
-        // Tombol kembali
-        document.getElementById('back-to-main-from-create').addEventListener('click', () => showScreen('main-menu-screen'));
+        // Developer controls
+        kickPlayerBtn.addEventListener('click', () => kickPlayerModal.classList.remove('hidden'));
+        closeKickModalBtn.addEventListener('click', () => kickPlayerModal.classList.add('hidden'));
+        submitKickBtn.addEventListener('click', () => {
+            const playerIdToKick = kickPlayerIdInput.value.trim();
+            if (playerIdToKick) {
+                const lobbyCode = gameCodeDisplay.textContent;
+                removePlayerFromLobby(lobbyCode, playerIdToKick);
+                kickPlayerModal.classList.add('hidden');
+                kickPlayerIdInput.value = '';
+            } else {
+                showModal("ID pemain harus diisi.", true);
+            }
+        });
+
+        clearChatBtn.addEventListener('click', async () => {
+            const confirmClear = window.confirm("Apakah Anda yakin ingin menghapus semua pesan chat global? Aksi ini tidak dapat dibatalkan.");
+            if (confirmClear) {
+                const q = query(collection(db, CHAT_COLLECTION));
+                const snapshot = await getDocs(q);
+                const batch = writeBatch(db);
+                snapshot.docs.forEach((doc) => {
+                    batch.delete(doc.ref);
+                });
+                await batch.commit();
+            }
+        });
+
+        // Back buttons
+        document.getElementById('back-to-auth-from-register').addEventListener('click', () => showScreen('auth-screen'));
+        document.getElementById('back-to-auth-from-login').addEventListener('click', () => showScreen('auth-screen'));
         document.getElementById('back-to-main-from-join').addEventListener('click', () => showScreen('main-menu-screen'));
         document.getElementById('back-to-main-from-lobby').addEventListener('click', () => {
             if (unsubscribeLobby) unsubscribeLobby();
@@ -548,10 +721,17 @@
             const description = descriptionInput.value.trim();
             const isSpy = myRoleDisplay.textContent === "Kamu adalah Spy!";
             if (description.length < 10 && !isSpy) {
-                showModal("Deskripsi minimal 10 karakter. Silakan coba lagi.");
+                showModal("Deskripsi minimal 10 karakter. Silakan coba lagi.", true);
                 return;
             }
             submitDescription();
+        });
+        
+        chatSendBtn.addEventListener('click', sendMessage);
+        chatInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
         });
     </script>
     <style>
@@ -580,44 +760,81 @@
 </head>
 <body class="bg-gray-900 text-gray-100 flex items-center justify-center min-h-screen p-4">
 
+    <!-- Modal for Notifications -->
+    <div id="modal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50 hidden">
+        <div class="bg-gray-700 p-6 rounded-xl shadow-lg border-2 border-indigo-400 max-w-sm w-full text-center">
+            <p id="modal-message" class="text-lg font-semibold mb-4"></p>
+            <button id="modal-close-btn" class="bg-indigo-500 text-white font-bold py-2 px-4 rounded-full hover:bg-indigo-600 transition-colors duration-300">Tutup</button>
+        </div>
+    </div>
+    
     <div id="app-container" class="container mx-auto p-8 bg-gray-800 rounded-2xl shadow-xl border-t-4 border-b-4 border-indigo-500 transition-all duration-500 ease-in-out">
         
-        <!-- Modal untuk Notifikasi -->
-        <div id="modal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50 hidden">
-            <div class="bg-gray-700 p-6 rounded-xl shadow-lg border-2 border-indigo-400 max-w-sm w-full text-center">
-                <p id="modal-message" class="text-lg font-semibold mb-4"></p>
-                <button id="modal-close-btn" class="bg-indigo-500 text-white font-bold py-2 px-4 rounded-full hover:bg-indigo-600 transition-colors duration-300">Tutup</button>
+        <!-- Register/Login Screen -->
+        <div id="auth-screen" class="game-screen text-center space-y-6">
+            <h1 class="text-5xl font-bold mb-2 text-indigo-400 drop-shadow-md">Siapakah Spy?</h1>
+            <p class="text-gray-400">Mainkan game detektif sosial ini bersama teman-temanmu!</p>
+            <div id="auth-options" class="space-y-4">
+                <button id="show-register-btn" class="w-full bg-indigo-500 text-white font-bold py-3 px-6 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105 shadow-lg">Daftar</button>
+                <button id="show-login-btn" class="w-full bg-gray-700 text-gray-100 font-bold py-3 px-6 rounded-full hover:bg-gray-600 transition-transform duration-300 transform hover:scale-105 shadow-lg">Login</button>
             </div>
         </div>
 
-        <!-- Layar Utama -->
-        <div id="main-menu-screen" class="game-screen text-center space-y-6">
+        <!-- Register Form -->
+        <div id="register-screen" class="game-screen text-center space-y-6 hidden">
+            <h2 class="text-3xl font-bold text-indigo-400 mb-4">Daftar</h2>
+            <input type="text" id="register-name-input" placeholder="Nama Anda" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <input type="email" id="register-email-input" placeholder="Email Anda" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <input type="password" id="register-password-input" placeholder="Password (min 6 karakter)" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <button id="submit-register" class="w-full bg-indigo-500 text-white font-bold py-3 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105">Daftar</button>
+            <button id="back-to-auth-from-register" class="w-full bg-gray-700 text-gray-100 font-bold py-3 px-6 rounded-full transition-colors duration-200">Kembali</button>
+        </div>
+
+        <!-- Login Form -->
+        <div id="login-screen" class="game-screen text-center space-y-6 hidden">
+            <h2 class="text-3xl font-bold text-indigo-400 mb-4">Login</h2>
+            <input type="email" id="login-email-input" placeholder="Email Anda" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <input type="password" id="login-password-input" placeholder="Password" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <button id="submit-login" class="w-full bg-indigo-500 text-white font-bold py-3 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105">Login</button>
+            <button id="back-to-auth-from-login" class="w-full bg-gray-700 text-gray-100 font-bold py-3 px-6 rounded-full transition-colors duration-200">Kembali</button>
+        </div>
+
+        <!-- Main Menu Screen -->
+        <div id="main-menu-screen" class="game-screen text-center space-y-6 hidden">
             <h1 class="text-5xl font-bold mb-2 text-indigo-400 drop-shadow-md">Siapakah Spy?</h1>
             <p class="text-gray-400">Mainkan game detektif sosial ini bersama teman-temanmu!</p>
             <div class="space-y-4">
                 <button id="create-game-btn" class="w-full bg-indigo-500 text-white font-bold py-3 px-6 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105 shadow-lg">Buat Game Baru</button>
                 <button id="join-game-btn" class="w-full bg-gray-700 text-gray-100 font-bold py-3 px-6 rounded-full hover:bg-gray-600 transition-transform duration-300 transform hover:scale-105 shadow-lg">Gabung Game</button>
             </div>
+            
+            <!-- Global Chat -->
+            <div class="bg-gray-700 p-4 rounded-xl shadow-inner border-2 border-gray-600 mt-6">
+                <h3 class="text-lg font-semibold mb-2">Chat Global</h3>
+                <ul id="chat-messages" class="h-40 overflow-y-auto text-left text-sm space-y-1 p-2 bg-gray-800 rounded-lg mb-2"></ul>
+                <div class="flex space-x-2">
+                    <input type="text" id="chat-input" placeholder="Ketik pesan..." class="flex-1 p-2 bg-gray-900 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                    <button id="chat-send-btn" class="bg-indigo-500 text-white font-bold py-2 px-4 rounded-lg hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105">Kirim</button>
+                </div>
+            </div>
+
+            <!-- Developer Controls -->
+            <div id="developer-controls" class="space-y-4 hidden mt-6">
+                <h3 class="text-xl font-bold text-red-400">Developer Controls</h3>
+                <button id="clear-chat-btn" class="w-full bg-red-500 text-white font-bold py-3 rounded-full hover:bg-red-600 transition-transform duration-300 transform hover:scale-105">Hapus Chat Global</button>
+                <button id="kick-player-btn" class="w-full bg-yellow-500 text-gray-900 font-bold py-3 rounded-full hover:bg-yellow-600 transition-transform duration-300 transform hover:scale-105">Keluarkan Pemain</button>
+            </div>
         </div>
 
-        <!-- Layar Formulir Nama (Buat Game) -->
-        <div id="name-screen-create" class="game-screen text-center space-y-6 hidden">
-            <h2 class="text-3xl font-bold text-indigo-400 mb-4">Buat Game Baru</h2>
-            <input type="text" id="player-name-input-create" placeholder="Masukkan nama Anda" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500">
-            <button id="submit-name-create" class="w-full bg-indigo-500 text-white font-bold py-3 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105">Lanjutkan</button>
-            <button id="back-to-main-from-create" class="w-full bg-gray-700 text-gray-100 font-bold py-3 px-6 rounded-full transition-colors duration-200">Kembali</button>
-        </div>
-
-        <!-- Layar Formulir Gabung Game -->
+        <!-- Join Game Form Screen -->
         <div id="name-screen-join" class="game-screen text-center space-y-6 hidden">
             <h2 class="text-3xl font-bold text-indigo-400 mb-4">Gabung Game</h2>
-            <input type="text" id="player-name-input-join" placeholder="Masukkan nama Anda" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-4">
             <input type="text" id="lobby-code-input" placeholder="Masukkan kode lobi" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500">
             <button id="submit-name-join" class="w-full bg-indigo-500 text-white font-bold py-3 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105">Gabung</button>
             <button id="back-to-main-from-join" class="w-full bg-gray-700 text-gray-100 font-bold py-3 px-6 rounded-full transition-colors duration-200">Kembali</button>
         </div>
 
-        <!-- Layar Lobby -->
+        <!-- Lobby Screen -->
         <div id="lobby-screen" class="game-screen text-center space-y-6 hidden">
             <h2 class="text-3xl font-bold text-indigo-400 mb-2">Lobi Game</h2>
             <p class="text-gray-400 text-sm">Bagikan kode ini ke teman-temanmu!</p>
@@ -632,7 +849,7 @@
             <button id="back-to-main-from-lobby" class="w-full bg-gray-700 text-gray-100 font-bold py-3 px-6 rounded-full transition-colors duration-200">Kembali</button>
         </div>
 
-        <!-- Layar Game -->
+        <!-- Game Screen -->
         <div id="game-screen" class="game-screen text-center space-y-6 hidden">
             <h2 id="my-role" class="text-3xl font-bold text-green-400 mb-4"></h2>
             <div class="bg-gray-700 p-6 rounded-2xl shadow-inner border-2 border-green-400 space-y-4">
@@ -649,12 +866,12 @@
             </div>
 
             <div id="game-control-section" class="hidden">
-                <textarea id="description-input" class="w-full p-3 h-24 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-2" placeholder="Deskripsikan kata atau ajukan pertanyaan..."></textarea>
+                <textarea id="description-input" class="w-full p-3 h-24 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-2" maxlength="225" placeholder="Deskripsikan kata atau ajukan pertanyaan..."></textarea>
                 <button id="submit-description-btn" class="w-full bg-indigo-500 text-white font-bold py-3 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105">Selesai Giliran</button>
             </div>
         </div>
 
-        <!-- Layar Voting -->
+        <!-- Voting Screen -->
         <div id="voting-screen" class="game-screen text-center space-y-6 hidden">
             <h2 class="text-3xl font-bold text-indigo-400 mb-4">Fase Voting</h2>
             <p id="vote-message" class="text-gray-400"></p>
@@ -662,11 +879,24 @@
             <ul id="voting-player-list" class="space-y-3"></ul>
         </div>
         
-        <!-- Layar Hasil -->
+        <!-- Results Screen -->
         <div id="results-screen" class="game-screen text-center space-y-6 hidden">
             <h2 class="text-3xl font-bold text-indigo-400 mb-4">Hasil Game!</h2>
             <div id="game-results-display" class="bg-gray-700 p-6 rounded-2xl shadow-inner border-2 border-indigo-400 space-y-4"></div>
             <button id="new-game-btn" class="w-full bg-indigo-500 text-white font-bold py-3 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105">Main Lagi</button>
+        </div>
+
+        <!-- Kick Player Modal -->
+        <div id="kick-player-modal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50 hidden">
+            <div class="bg-gray-700 p-6 rounded-xl shadow-lg border-2 border-indigo-400 max-w-sm w-full text-center space-y-4">
+                <h3 class="text-xl font-semibold">Keluarkan Pemain</h3>
+                <p class="text-gray-400 text-sm">Masukkan ID pengguna yang ingin dikeluarkan dari lobi saat ini.</p>
+                <input type="text" id="kick-player-id-input" placeholder="ID Pemain" class="w-full p-3 bg-gray-800 text-gray-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500">
+                <div class="flex justify-end space-x-2">
+                    <button id="close-kick-modal-btn" class="bg-gray-500 text-white font-bold py-2 px-4 rounded-full hover:bg-gray-600">Batal</button>
+                    <button id="submit-kick-btn" class="bg-red-500 text-white font-bold py-2 px-4 rounded-full hover:bg-red-600">Keluarkan</button>
+                </div>
+            </div>
         </div>
     </div>
 </body>
