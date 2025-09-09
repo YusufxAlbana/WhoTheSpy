@@ -154,7 +154,7 @@
             const newGameState = {
                 status: 'lobby',
                 hostId: userId,
-                players: [{ id: userId, name: userDisplayName, isHost: true, vote: null }],
+                players: [{ id: userId, name: userDisplayName, isHost: true, vote: null, description: '' }],
                 location: { name: randomLocation.name, words: randomLocation.words },
                 spyId: null,
                 votes: {},
@@ -199,7 +199,7 @@
                      listenToLobby(lobbyCode);
                      return;
                 }
-                const newPlayer = { id: userId, name: userDisplayName, isHost: false, vote: null };
+                const newPlayer = { id: userId, name: userDisplayName, isHost: false, vote: null, description: '' };
                 const updatedPlayers = [...lobbyData.players, newPlayer];
                 await updateDoc(lobbyRef, { players: updatedPlayers });
                 showScreen('lobby-screen');
@@ -261,10 +261,21 @@
                 }
             }
             
-            // Lanjutkan ke giliran berikutnya
-            descriptionInput.value = '';
+            // Simpan deskripsi pemain di Firestore
             const lobbyRef = doc(db, `artifacts/${appId}/public/data/lobbies`, lobbyCode);
             const lobbySnap = await getDoc(lobbyRef);
+            const players = lobbySnap.data().players;
+            const updatedPlayers = players.map(p => {
+                if (p.id === userId) {
+                    return { ...p, description: description };
+                }
+                return p;
+            });
+
+            await updateDoc(lobbyRef, { players: updatedPlayers });
+
+            // Lanjutkan ke giliran berikutnya
+            descriptionInput.value = '';
             const lobbyData = lobbySnap.data();
             const currentPlayerTurn = lobbyData.currentPlayerTurn;
             await setNextPlayerTurn(lobbyCode, currentPlayerTurn);
@@ -427,10 +438,30 @@
             showScreen('voting-screen');
             votingPlayerList.innerHTML = '';
             
+            const voteCounts = lobbyData.players.reduce((acc, player) => {
+                acc[player.id] = 0;
+                return acc;
+            }, {});
+
+            // Hitung vote
+            for (const voterId in lobbyData.votes) {
+                const votedPlayerId = lobbyData.votes[voterId];
+                if (voteCounts[votedPlayerId] !== undefined) {
+                    voteCounts[votedPlayerId]++;
+                }
+            }
+
             lobbyData.players.forEach(player => {
                 const li = document.createElement('li');
                 li.className = 'p-4 rounded-lg bg-gray-700 text-gray-100 cursor-pointer hover:bg-indigo-600 transition-colors duration-300';
-                li.textContent = player.name;
+                li.innerHTML = `
+                    <div class="flex justify-between items-center font-bold">
+                        <span>${player.name}</span>
+                        <span class="text-sm">Votes: ${voteCounts[player.id]}</span>
+                    </div>
+                    ${player.description ? `<p class="text-xs text-gray-300 mt-2 italic">"${player.description}"</p>` : ''}
+                `;
+
                 li.addEventListener('click', () => {
                     if (player.id !== userId) {
                         votePlayer(player.id, gameCodeDisplay.textContent);
@@ -505,6 +536,14 @@
             // Lebih baik hapus dokumen lobi atau atur ulang status
         });
         
+        // Tombol kembali
+        document.getElementById('back-to-main-from-create').addEventListener('click', () => showScreen('main-menu-screen'));
+        document.getElementById('back-to-main-from-join').addEventListener('click', () => showScreen('main-menu-screen'));
+        document.getElementById('back-to-main-from-lobby').addEventListener('click', () => {
+            if (unsubscribeLobby) unsubscribeLobby();
+            showScreen('main-menu-screen');
+        });
+
         submitDescriptionBtn.addEventListener('click', () => {
             const description = descriptionInput.value.trim();
             const isSpy = myRoleDisplay.textContent === "Kamu adalah Spy!";
@@ -566,6 +605,7 @@
             <h2 class="text-3xl font-bold text-indigo-400 mb-4">Buat Game Baru</h2>
             <input type="text" id="player-name-input-create" placeholder="Masukkan nama Anda" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500">
             <button id="submit-name-create" class="w-full bg-indigo-500 text-white font-bold py-3 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105">Lanjutkan</button>
+            <button id="back-to-main-from-create" class="w-full bg-gray-700 text-gray-100 font-bold py-3 px-6 rounded-full transition-colors duration-200">Kembali</button>
         </div>
 
         <!-- Layar Formulir Gabung Game -->
@@ -574,6 +614,7 @@
             <input type="text" id="player-name-input-join" placeholder="Masukkan nama Anda" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-4">
             <input type="text" id="lobby-code-input" placeholder="Masukkan kode lobi" class="w-full p-3 bg-gray-700 text-gray-100 rounded-lg placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500">
             <button id="submit-name-join" class="w-full bg-indigo-500 text-white font-bold py-3 rounded-full hover:bg-indigo-600 transition-transform duration-300 transform hover:scale-105">Gabung</button>
+            <button id="back-to-main-from-join" class="w-full bg-gray-700 text-gray-100 font-bold py-3 px-6 rounded-full transition-colors duration-200">Kembali</button>
         </div>
 
         <!-- Layar Lobby -->
@@ -588,6 +629,7 @@
             <h3 class="text-xl font-semibold mb-2">Pemain yang Bergabung:</h3>
             <ul id="players-list" class="space-y-2"></ul>
             <button id="start-game-btn" class="w-full bg-green-500 text-white font-bold py-3 rounded-full hover:bg-green-600 transition-transform duration-300 transform hover:scale-105 hidden mt-4">Mulai Game!</button>
+            <button id="back-to-main-from-lobby" class="w-full bg-gray-700 text-gray-100 font-bold py-3 px-6 rounded-full transition-colors duration-200">Kembali</button>
         </div>
 
         <!-- Layar Game -->
